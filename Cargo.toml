@@ -1,0 +1,13 @@
+[package]
+name = "rust_html_span"
+version = "0.1.0"
+edition = "2021"
+
+# 库目标
+[lib]
+name = "rust_html_span_lib" # 库的名字
+path = "src/lib.rs" # 库的路径
+
+[dependencies]
+html5ever = "0.27"
+cssparser = "0.34.0"
