@@ -3,7 +3,7 @@
 use rust library **html5ever** to transfer html fragment to text spans!
 1. base spanInfos ✓
 2. support line-break and space ✓
-3. support properties pase x
+3. support properties parse x
 
 for example:
 ```shell
