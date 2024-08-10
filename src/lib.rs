@@ -6,7 +6,7 @@ use std::fmt::{Debug, Formatter};
 use std::ops::Range;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU32, Ordering};
-
+use cssparser::{Parser, ParserInput};
 use html5ever::{
     Attribute, ExpandedName, local_name, LocalName, Namespace, parse_fragment, ParseOpts, Prefix,
     QualName,
@@ -14,7 +14,7 @@ use html5ever::{
 use html5ever::interface::{ElementFlags, NodeOrText, QuirksMode, tree_builder, TreeSink};
 use html5ever::tendril::{StrTendril, TendrilSink};
 use html5ever::tree_builder::TreeBuilderOpts;
-
+use serde::Serialize;
 pub use html_tag::*;
 
 mod html_tag;
@@ -133,7 +133,7 @@ pub struct TextSpanInfo {
     is_virtual: bool,
     /// represents element node type it belongs to
     html_tag: HtmlTag,
-    /// 记录在 Html 标签上的属性（比如 font、style）
+    /// Attributes recorded on Html tags (such as font, style)
     attrs: Vec<Attribute>,
 }
 
@@ -156,12 +156,12 @@ fn is_ascii_whitespace(c: char) -> bool {
     }
 }
 
-/// 处理 Html 中的文本，规范空格和换行
+/// Handle text in Html, normalize Spaces and line breaks
 fn normalize_html_text(has_space: bool, text: &str) -> String {
     let mut result = String::with_capacity(text.len());
-    let mut in_whitespace = has_space; // 如果之前的文本末尾是空格，则从空格开始计算
+    let mut in_whitespace = has_space; // If there is a space at the end of the preceding text, the calculation starts with the space
     for c in text.chars() {
-        // 不要使用 is_whitespace，不要处理 unicode 中的空格类型
+        // Do not use is_whitespace and do not handle whitespace types in unicode
         if is_ascii_whitespace(c) {
             if !in_whitespace {
                 result.push(' ');
@@ -188,7 +188,7 @@ pub struct HtmlTreeSink {
     pub map: HashMap<u32, u32>,
     /// responsible for assigning tag of node
     pub tag_distributor: AtomicU32,
-    /// 拼接的完整文本
+    /// final full text
     pub full_text: String,
     /// debug mode could show more info
     pub debug_mode: bool,
@@ -220,21 +220,16 @@ impl HtmlTreeSink {
         self.tag_distributor.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// 处理添加文本类型的场景：
-    /// 1.处理空格和换行
-    /// 2.建立附属于 parent 节点的 text_span_info
-    /// 3.向上不断更新父节点的 text_span_info
+
     fn process_append_text(&mut self, text: &str, need_to_normalize: bool, parent: &Handle) {
         let last_is_whitespace = self.full_text.ends_with(' ');
         let text = if need_to_normalize {
             let mut text = normalize_html_text(last_is_whitespace, text);
             if !self.full_text.is_empty() && parent.children.borrow().is_empty() {
                 if let NodeData::Element { name, .. } = &parent.data {
-                    // 为块级元素添加换行
                     match name.local {
                         local_name!("div") | local_name!("p") => {
                             if last_is_whitespace {
-                                // 如果当前最后一个字符是空格则替换为换行符，换行的归属可能不重要
                                 self.full_text.replace_range(
                                     (self.full_text.len() - 1)..self.full_text.len(),
                                     "\n",
@@ -262,7 +257,7 @@ impl HtmlTreeSink {
             NodeData::Element { name, attrs, .. } => (HtmlTag::from(name), attrs.take().clone()),
             _ => (HtmlTag::Span, Vec::new()),
         };
-        // 此处直接创建，因为每个文本一定要有一个 text_span_info，通过 is_virtual 来区分！
+        // Create directly here, because each text must have a text_span_info, distinguished by is_virtual!
         self.text_span_infos.push(TextSpanInfo {
             id,
             content: text.to_string(),
@@ -283,13 +278,10 @@ impl HtmlTreeSink {
         self.text_span_infos.iter().any(|span| span.id == p_id)
     }
 
-    /// 处理添加节点类型的场景：
-    /// 1.标记 br 标签
-    /// 2.建立附属于 parent 节点的 text_span_info
-    /// 3.更新当前父子关系，建立索引
+
     fn process_append_node(&mut self, child: &Handle, parent: &Handle) {
         if let NodeData::Element { name, .. } = &child.data {
-            //1. br 标记转换为一个换行文本
+            //1.The br tag is converted to a newline text
             if name.local == local_name!("br") {
                 if self.full_text.ends_with(' ') {
                     self.full_text
@@ -300,14 +292,15 @@ impl HtmlTreeSink {
             }
         }
 
-        // 2.创建附属于 parent 的 text_span_info，如果已经有子节点说明已经创建过，不再重复创建!
+        // 2.Create a text_span_info attached to the parent. If there are already child nodes, it means that they have already been created.Create a text_span_info attached to the parent. 
+        // If there are already child nodes, it means that they have already been created.
         let is_parent_empty = parent.children.borrow().is_empty();
         if is_parent_empty {
-            // node 添加到 node 的场景，文本是长度为0的字符串切片
+            // node Added to the node scene, the text is a string slice of length 0
             let text = "";
             self.process_append_text(text, true, parent);
         }
-        // 3.建立父子索引
+        // 3.establish child and parent index relationship
         self.map
             .insert(child.get_unique_id(), parent.get_unique_id());
     }
@@ -541,66 +534,60 @@ impl TreeSink for HtmlTreeSink {
     }
 }
 
-// #[derive(Debug, Clone)]
-// pub struct StyleAttribute(PropertyDeclaration);
-//
-// impl Deref for StyleAttribute {
-//     type Target = PropertyDeclaration;
-//
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-//
-// impl StyleAttribute {
-//     pub fn new(declaration: PropertyDeclaration) -> Self {
-//         StyleAttribute(declaration)
-//     }
-// }
-
-// TODO: 这个保存直接设置在标签上的样式
-#[derive(Debug, Clone)]
-pub struct TextAttribute {}
-
-/// 保存一个 Tag 应用的范围和属性（叫啥名字更合适呢？）
 #[derive(Debug, Clone)]
 pub struct HtmlTagRange {
     pub id: u32,
     pub parent_id: u32,
     pub tag: HtmlTag,
     pub range: Range<usize>,
-    pub attributes: Vec<Attribute>,
-    // pub text_attributes: Vec<TextAttribute>,
+    pub properties: Vec<Property>,
 }
 
-/// 最终输出给外部使用的信息
+/// output info for user!
 #[derive(Debug)]
 pub struct HtmlInfo {
     pub text: String,
     pub ranges: Vec<HtmlTagRange>,
 }
 
-// pub fn parse_attributes(attributes: &[Attribute]) -> (Vec<StyleAttribute>, Vec<TextAttribute>) {
-//     let mut style_attributes = Vec::new();
-//     let text_attributes = Vec::new();
-// 
-//     for attr in attributes {
-//         match attr.name.local {
-//             local_name!("style") => {
-//                 let mut input = ParserInput::new();
-//                 let mut parser = recce_css::Parser::new(&mut input);
-//                 if let Ok(decls) = recce_css::parse_to_decls(&mut parser) {
-//                     style_attributes.extend(decls.into_iter().map(|p| StyleAttribute(p)));
-//                 }
-//             }
-//             _ => {}
-//         }
-//     }
-// 
-//     (style_attributes, text_attributes)
-// }
+#[derive(Debug, Clone, Serialize)]
+pub struct Property {
+    pub key: String,
+    pub val: String,
+}
+impl Property {
+    fn new(key: String, val: String) -> Self {
+        Self { key, val }
+    }
+}
 
-/// 解析一个 Html 片段为 HtmlInfo
+pub fn parse_attributes(attributes: &[Attribute]) -> Vec<Property> {
+    let mut style_properties: Vec<Property> = Vec::new();
+    for attr in attributes {
+        match attr.name.local {
+            local_name!("style") => {
+                let mut input = ParserInput::new(&attr.value);
+                let mut parser = Parser::new(&mut input);
+                loop {
+                    if let Ok(key) = parser.expect_ident_cloned() {
+                        parser.expect_colon().unwrap();
+                        parser.skip_whitespace();
+                        if let Ok(val) = parser.expect_ident_cloned() {
+                            style_properties.push(Property::new(key.to_string(), val.to_string()));
+                        }
+                        parser.expect_semicolon().unwrap_or_else(|_| {
+                            parser.skip_whitespace();
+                        });
+                        parser.skip_whitespace();
+                    } else { break; }
+                }
+            }
+            _ => {}
+        }
+    }
+    style_properties
+}
+
 pub fn parse(html: &str) -> HtmlInfo {
     let opts = ParseOpts {
         tree_builder: TreeBuilderOpts {
@@ -610,7 +597,7 @@ pub fn parse(html: &str) -> HtmlInfo {
         ..Default::default()
     };
     let html_tree_sink = HtmlTreeSink::default();
-    // NOTE: parse_fragment 接口限制必须传入一个上下文节点，这里传一个假的
+    // NOTE: The parse_fragment interface restriction must pass a context node, in this case a fake one
     let parser = parse_fragment(
         html_tree_sink,
         opts,
@@ -629,11 +616,11 @@ pub fn parse(html: &str) -> HtmlInfo {
             if text_span_info.is_virtual || text_span_info.id == ROOT_TAG {
                 return None;
             }
-            // let (style_attributes, text_attributes) = parse_attributes(&i.attrs);
+            let style_properties = parse_attributes(&text_span_info.attrs);
             let p_id = if let Some(id) = sink.map.get(&text_span_info.id) {
                 *id
             } else {
-                // 目前创建的 span 不会有 0 的场景，我们用 0 表示没有父节点
+                // The span created so far will not have a 0 scene, we use 0 to indicate that there is no parent node
                 0
             };
             Some(HtmlTagRange {
@@ -641,7 +628,7 @@ pub fn parse(html: &str) -> HtmlInfo {
                 parent_id: p_id,
                 tag: text_span_info.html_tag,
                 range: text_span_info.range.clone(),
-                attributes: text_span_info.attrs.clone(),
+                properties: style_properties,
             })
         })
         .collect();
@@ -656,8 +643,8 @@ impl fmt::Display for HtmlInfo {
         for item in &self.ranges {
             writeln!(
                 f,
-                "[id:{}, parent_id:{}, tag: {:?}, range:{:?}, attributes:{:?}]",
-                item.id, item.parent_id, item.tag, item.range, item.attributes
+                "[id:{}, parent_id:{}, tag: {:?}, range:{:?}, properties:{:?}]",
+                item.id, item.parent_id, item.tag, item.range, item.properties
             ).expect("display for HtmlInfo error!");
         }
         writeln!(f, "text: {}", self.text)
@@ -723,7 +710,7 @@ mod test {
 
     #[test]
     pub fn attributes() {
-        let n_html = r#"<span style="color: red">hello world!</span>"#;
+        let n_html = r#"<span style="color: red;text-align:right" >hello world! I am <span style="color: blue; font-weight: bold;">18</span></span>"#;
         println!("{}", parse(n_html));
     }
 }
